@@ -1,0 +1,1049 @@
+\documentclass[11pt]{article}
+\usepackage{geometry} 
+
+\geometry{letterpaper, top=1.5cm, left=2cm}                
+\usepackage{graphicx}
+\usepackage{amssymb, amsmath}
+\usepackage{epstopdf}
+\DeclareGraphicsRule{.tif}{png}{.png}{`convert #1 `dirname #1`/`basename #1 .tif`.png}
+
+%% to enable placement option 'H'
+\usepackage{float}
+
+%% formatting miscellany
+\usepackage{setspace}
+\doublespacing
+
+%% for linenumbers for PLOS 
+\usepackage{lineno}
+\linenumbers
+
+% setting bibliographic styles
+\usepackage[square,numbers]{natbib}
+
+\usepackage{parskip} % newlines before paragraphs
+\raggedright 
+\setlength\parindent{0pt} % no paragraph indents
+
+\renewcommand{\familydefault}{cmss}
+
+% for bigcdot definition
+%\usepackage{scalerel}
+%\DeclareMathOperator*{\bigcdot}{\scalerel*{\cdot}{\bigodot}}
+
+
+% for landscape table
+% \usepackage{rotating}
+
+\title{Challenges in real-time prediction of infectious disease: a case study of dengue in Thailand}
+\author{Nicholas G. Reich$^1$, Stephen A. Lauer$^1$, Krzysztof Sakrejda$^1$, \\ Sopon Iamsirithaworn$^2$, Soawapak Hinjoy$^3$, Paphanij Suangtho$^3$, Suthanun Suthachana$^3$, \\ Hannah E. Clapham$^4$, Henrik Salje$^4$, Derek A. T. Cummings$^{4,5}$, Justin Lessler$^4$ }
+
+\begin{document}
+\maketitle
+
+%\tableofcontents
+
+\abstract{Epidemics of communicable diseases place a huge burden on public health infrastructures across the world. Producing accurate and actionable forecasts of infectious disease incidence at short and long time scales will improve public health response to outbreaks. However, scientists and public health officials face many obstacles in trying to create such real-time forecasts of infectious disease incidence. Dengue is a mosquito-borne virus that annually infects over 400 million people worldwide. We developed a real-time forecasting model for dengue hemorrhagic fever in the 77 provinces of Thailand.  We created a practical computational infrastructure that generated multi-step predictions of dengue incidence in Thai provinces every two weeks throughout 2014. These predictions show mixed performance across provinces, out-performing seasonal baseline models in over half of provinces at a 1.5 month horizon. Additionally, to assess the degree to which delays in case reporting make long-range prediction a challenging task, we compared the performance of our real-time predictions with predictions made with fully reported data. This paper provides valuable lessons for the implementation of real-time predictions in the context of public health decision making.}
+
+\clearpage
+
+\section*{Author Summary}
+Predicting the course of infectious disease outbreaks in real-time is a challenging task. It requires knowledge of the particular disease system as well as a pipeline that can turn raw data from a public health surveillance system into calibrated predictions of disease incidence. Dengue is a mosquito-borne infectious disease that places an immense public health and economic burden upon countries around the world, especially in tropical areas. In 2014 our research team, a collaboration of the Ministry of Public Health of Thailand and academic researchers from the United States, implemented a system for generating real-time forecasts of dengue hemorrhagic fever based on the disease surveillance reports from Thailand. We compared predictions from several different statistical models, identifying locations and times where our predictions were accurate. We also quantified the extent to which delayed reporting of cases in real-time impacted our predictions. Broadly speaking, improving real-time predictions can enable more targeted, timely interventions and risk communication, both of which have a measurable impact on disease spread in epidemic and pandemic scenarios. It is vital that we continue to build knowledge about the best ways to make these forecasts and integrate them into public health decision making.
+
+\section*{Affiliations}
+$^1$Department of Biostatistics and Epidemiology, School of Public Health and Health Sciences, University of Massachusetts - Amherst, Amherst, Massachusetts, USA; 
+$^2$Office of Disease Prevention and Control 1, Bangkok, Thailand; 
+$^3$Bureau of Epidemiology, Department of Disease Control, Ministry of Public Health, Bangkok, Thailand;
+$^4$Department of Epidemiology, Johns Hopkins Bloomberg School of Public Health, Baltimore, Maryland, USA; and, 
+$^5$Emerging Pathogens Institute, Department of Biology, University of Florida, Gainesville, Florida, USA.
+
+\clearpage
+
+<<global-options, echo=FALSE>>=
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+@
+
+<<load-packages>>=
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(dengueThailand)
+library(scales)
+library(RColorBrewer)
+library(xtable)
+library(mgcv)
+library(gridExtra)
+
+theme_set(theme_bw())
+
+source("code/plot_outbreak_map.R")
+source("../../source/realtime-models/make-aggregated-counts.R")
+source('../../source/eval-past-forecasts/eval-forecast-fxns.R')
+source('../../source/eval-past-forecasts/eval-aggregation-fxns.R')
+@
+
+
+<<load-data, echo=FALSE>>=
+## load files with forecasts, evaluation metrics and data
+load("data/20140609-spamd-nomem-allyrs-10step-6lag-casedata.RData")
+load("data/20150930-spamd-nomem-allyrs-10step-6lag-evals.RData")
+load("data/20151027-province-seasonalities.RData")
+fulldata_biweekly_evals <- readRDS("data/20151001-fulldata-spamd-nomem-smooth-allyrs-3tops-10step-6lag-evals.rds")
+fulldata_biweekly_preds <- fulldata_biweekly_evals$biweekly_data
+
+## load just the biweekly predictions
+biweekly_preds <- biweek_eval_data$biweekly_data
+#biweekly_preds <- fulldata_biweekly_preds
+
+data(thai_prov_data)
+@
+
+
+
+\section{Introduction}
+
+%%% Overview
+Producing accurate and actionable forecasts of infectious disease incidence at short and long time scales will improve public health response to outbreaks. %In recent years, there has been an increased interest in real-time predictions of infectious disease outbreaks. This is evidenced by several recent ``data competitions''. The US Centers for Disease Control and Prevention ran an influenza prediction challenge in [[2012]]. DARPA ran a competition to predict the spread of Chikungunya in the Americas during 2014. [[Run Web f Knowledge search to show increase?]] 
+Real-time forecasts of infectious disease outbreaks can facilitate targeted intervention and prevention strategies, such as increased healthcare staffing or vector control measures. However, we currently have a limited understanding of the best ways to integrate forecasts into real-time public health decision-making. 
+
+%%% Dengue background
+Dengue is a mosquito-borne infectious disease that places an immense public health and economic burden upon countries around the world, especially in tropical areas. A severe form of the disease, dengue hemorrhagic fever (DHF), may lead to debilitating pain, organ shock, and even death \cite{Gubler:1998ws}. Currently over 2.5 billion individuals worldwide are at risk of infection with dengue, a mosquito-borne RNA virus \cite{WorldHealhOrganization:ww}. Global incidence of dengue has increased significantly over the past few decades, with estimated annual global incidence of about 400 million infections each year \cite{Bhatt:2013jb}. 
+
+Dengue is endemic in Thailand, which has 77 provinces including one large municipality (Bangkok). National annual incidence rates of reported dengue in Thailand range between 30 cases per 100,000 population and 224 cases per 100,000 population \cite{Limkittikul:2014dh}. Some estimates suggest that between 50-80\% of cases are inapparent and hence are difficult to detect clinically and often go unreported \cite{Endy:2011jg,Endy:2002vg,Endy:2010iu}. Annual outbreaks show dynamic temporal and spatial patterns, with great year-to-year and across-province variation, making public health planning and resource allocation an ongoing challenge \cite{Cazelles:2005es,Cummings:2004fy}.
+
+%% Surveillance overview
+With the maturation of disease surveillance and reporting systems in recent years, real-time disease forecasting has become a realistic goal in some settings.
+Recognizing the importance of this emerging field, several governmental agencies have established disease prediction contests in recent years, with the goal of having contestants produce accurate forecasts: e.g. a 2013 CDC influenza prediction challenge \cite{CentersforDiseaseControlandPrevention:2013tf}, a 2014 DARPA chikungunya prediction challenge \cite{DefenseAdvancedResearchProjectsAgency:2014uy}, and a 2015 National Science and Technology Council interagency Working Group dengue prediction challenge \cite{PandemicPredictionandForecastingScienceandTechnologyInteragencyWorkingGroup:uw}. 
+However, researchers and practitioners are still working to understand and establish a set of best practices for implementing real-time prediction algorithms in practice. 
+
+Creating predictions in real-time poses logistical, computational, and statistical challenges. Logistically, raw data must be made available in a standard format for processing into analysis datasets. Historical data is also needed to allow for training of the prediction model(s). To enable transparent evaluations, predictions should be formally registered and archived in a publicly available database. Computational infrastructure is needed to transform and/or merge raw data into the analysis dataset and to run the models themselves. Analytical challenges include appropriate model training, selection, and validation, considering adjustments for delayed or incomplete case reporting. Depending on the methods used, additional statistical work may be necessary to accurately report uncertainty in the reported predictions. Below, we describe our approaches to dealing with these challenges.
+
+%%% Our achievements
+In this manuscript we present the results from the first year of forecasting DHF across the 77 provinces in Thailand. In 2014 our research team, a collaboration of the Ministry of Public Health of Thailand and researchers from multiple academic institutions, implemented a system for generating real-time forecasts of DHF based on current disease surveillance reports from Thailand. 
+This paper illustrates several key components of a rigorous real time prediction framework, including: 
+\begin{itemize}
+\item a reliable pipeline for data transfer, cleaning, and analysis, with a data storage architecture that can recreate datasets that were available at a particular time (Section 2),
+\item a statistical model of disease transmission used to generate real-time predictions of infectious disease incidence (Section 3),
+\item an appropriate and rigorous model validation framework, including aggregating evaluations across location, calendar time, and prediction horizon (Section 4), and
+\item an assessment of the impact of case reporting delays on the accuracy of predictions (Sections 3.3 and 4.2).
+\end{itemize}
+Valuable efforts have been made to create, validate, and operationalize real-time influenza predictions for the US \cite{Shaman:2013dr}, although these efforts have not faced the same challenges of systematic delays in reported data. The infrastructure that we present in this manuscript provides valuable lessons for other collaborative prediction efforts between public health agencies and academic partners. 
+
+
+\section{Methods}
+%\section{A real-time prediction pipeline: turning data into forecasts}
+
+\subsection{Data overview}
+The data presented here come from the national surveillance system run by the Ministry of Public Health in Thailand. Monthly dengue hemorrhagic fever (DHF) case counts for each province are available from January 1968 through December 2005. Individual case reports (hereafter referred to as ``line-list'' data) were available for dengue fever (DF), DHF, and dengue shock syndrome from January 1, 1999 through December 31, 2014. The line-list data contains information on each case, including date of symptom onset, home address-code of the case (similar to a U.S. zip code), disease diagnosis code, and demographic information (sex, marital status, age, etc.). In years where we had overlapping sources for case data, the line-list data were used. A summary of province-level characteristics for all provinces in Thailand is provided in the appendix. Since 1968, several provinces have split into multiple provinces. Details on how we accommodate these province separations are available in the appendix. In one instance, the counts associated with a province (Bueng Kan) that split from another (Nong Khai) in 2011 have continued to be counted with the original province since we do not yet have enough data to predict for the new province.
+
+Theoretical work demonstrates that by choosing the generation time as the discrete time interval for case reporting, the case reports may more easily be used to model the reproductive rate of the disease \cite{Nishiura:2010jh}. The generation time for dengue is two weeks, hence we aggregated the line-list data into biweekly intervals and interpolated the monthly counts into biweekly counts. (We used a definition of biweeks that followed a standardized definition based on calendar dates. See Supplemental Table 1.) Interpolation was performed by fitting a monotonically increasing smooth spline to the cumulative case counts in each province, and then taking the differences between the estimated cumulative counts at each interval as the number of incident cases in a given interval.
+
+We chose to use only DHF cases because: (1) DHF is the only disease reported consistently across the 47 years of data collection, (2) DHF is less likely than DF to be misdiagnosed or to be differentially detected over time, and (3) from a public health perspective, DHF is a more relevant outcome, as it is a life-threatening condition and requires medical attention.
+
+\subsection{Ethics Statement}
+The research aspects of this study were approved by the Johns Hopkins Bloomberg School of Public Health and University of Massachusetts Amherst institutional review boards. Patient data was analyzed anonymously.
+
+\subsection{Real-time data management}
+We established a secure data transfer process to transmit data from the Thai disease surveillance system to U.S. researchers. Throughout the 2014 calendar year, Thai public health officials transmitted data approximately every two weeks to a secure server based in Baltimore, Maryland (Supplemental Table 2). These data were then loaded into a PostgreSQL database containing all of the data, including monthly case counts and a table with all line-list data received to date. The final report containing a cleaned and finalized record of all cases for the 2014 season was delivered in April 2015.  As of that time, this database held records of 2,586,928 unique cases of dengue in Thailand for the years 1968 through 2014, including records of 
+\Sexpr{format(sum(dhf_data$case_count, na.rm=TRUE),big.mark=",",scientific=FALSE)} 
+DHF cases (Figure \ref{fig:all-cases}).
+
+% for all case counts
+% sum(dhf_data$case_count, na.rm=TRUE)
+
+<<all-cases, echo=FALSE, fig.height=10, fig.width=9, fig.cap="Raw dengue hemorrhagic fever case counts for 77 provinces of Thailand across 47 years (1968 - 2014). Provinces are ordered by by population (larger populations on the top). Gray regions indicate periods of time when a province was not in existence.", fig.show='hide'>>=
+make_all_data_raster(dhf_data, "raw")
+@
+
+
+When forecasting, we will only ever have the cases recorded prior to the time the predictions are made. So that we could compare the expected real-time performance of models as if they had been applied in real-time, all data were archived in the database with a time-stamp on arrival. 
+This enabled researchers to ``turn back the clock'', i.e. to query data that was available at a particular point in time.  
+%Since all case reports have some delay between symptom onset and their delivery date, case counts would be different for the queries ``all cases with symptom onset prior to 2014-04-01'' and ``all cases reported before (i.e. with delivery date prior to) 2014-04-01''.  %In surveillance systems that may have short times between symptom onset and case report (e.g. Singapore's all-digital surveillance system reportedly has minimal reporting delays for cases \cite{Hii:2012wi}) this concern may be less of an issue. %But as described below, reporting delays in the Thai surveillance system differ by province, and case reports may take months to find their way into the official surveillance record. Therefore, having a system that measures these delays systematically and can base forecasts on data available at a particular time may play a vital role in creating and evaluating actionable forecasts.
+We refer to an ``analysis date'' as the date at which a multi-step forecast was made, using available data. Throughout this manuscript, we use the term ``nowcast'' to refer to predictions made for timepoints on or prior to the analysis date and ``forecasts'' to refer to predictions made for timepoints at or after the analysis date. 
+
+\subsection{Accounting for delays in case reporting}
+<<delays, echo=FALSE, eval=FALSE>>=
+## calculate overall delays
+all_delays <- dhf_data %>% 
+    filter(!is.na(delivery_date), year(delivery_date)==2014, !is.na(case_count)) %>%
+    mutate(date_sick = biweek_to_date(date_sick_biweek, date_sick_year), ## fix date sick
+           delivery_lag = as.numeric(difftime(delivery_date, date_sick, units="weeks"))) 
+
+## inserting these expressions below wasn't working, so I put them here.
+## \Sexpr{round(min(all_delays$delivery_lag))} 
+## \Sexpr{round(max(all_delays$delivery_lag))} 
+## \Sexpr{round(median(all_delays$delivery_lag))} 
+## \Sexpr{round(quantile(all_delays$delivery_lag, .75))} 
+@
+
+A key property of a surveillance system is the reporting delay, defined for our purposes as the duration of time between symptom onset and the case being available for analysis. 
+%In constructing real-time forecasts, characterizing the reporting delays and what data could be expected to be available at each particular time was a vitally important part of our data exploration process. 
+%It can be difficult or impossible to glean from static, historical records of disease incidence (such as, e.g., annual reports that contain weekly incidence numbers), what data were available at a particular time.  %The process of reporting case data varies widely depending on the surveillance system in question. 
+%For systems with networked digital record keeping, reporting delays may be minimal, and largely be due to the time it takes individuals to present with symptoms at a doctor's office, clinic, or hospital. In other surveillance systems, the journey of data from local clinic to national surveillance system may take weeks or months. In the U.S., influenza cases aggregated in surveillance data managed by the Centers for Disease Control and Prevention (CDC) often have between [[two and four week]] reporting delays \cite{TK}. 
+During 2014 reporting delays for dengue ranged from 1 to 50 weeks. 
+This was due to the process of reporting cases. Case reports typically follow a path of reporting from hospitals to district surveillance centers and then to provincial health offices before arriving at the national surveillance center. In all provinces, 50\% of cases were reported within 
+6 
+weeks and 75\% of cases were reported within 
+10 
+weeks. However, a small fraction of cases took quite a bit longer.
+To account for reporting delays, our models specified a reporting lag $l$, in biweeks. Data with onset dates within last $l$ biweeks were considered to be not fully reported and left out from the analysis. %For the predictions presented here, we fitted models to data with lags of 6 biweeks. 
+We present results from the models with a lag of 6 biweeks (about 3 months), as these produced stable predictions across the entire country. %and showed in subsequent analyses to have comparable aggregate performance with full-data forecasts that started at the same timepoint (see Table \ref{tab:absolute-horizon}).
+More sophisticated adjustments for reporting delays are the subject of our team's ongoing research.
+%To leverage all of the available data at a given time, methods could be developed to impute the remaining number of yet-to-be-reported cases in these recent biweeks using past observations on reporting delays. Correcting for reporting delays is the subject of our team's ongoing research.
+
+<<make-analysis-date-table, results='asis'>>=
+## tabulate delivery dates
+deliveries <- data_frame(delivery_date = as.Date(unique(na.omit(dhf_data$delivery_date))))
+
+## calculate total cases per delivery date
+new_cases <- dhf_data %>% group_by(delivery_date) %>% 
+    summarize(new_cases=sum(case_count, na.rm=TRUE)) %>%
+    ungroup() %>%
+    mutate(delivery_date = as.Date(delivery_date))
+
+## add corresponding analysis dates and new cases
+deliveries <- deliveries %>%  
+    mutate(analysis_date = biweek_to_date(date_to_biweek(delivery_date)+1, 
+                                          year(delivery_date))) %>%
+    left_join(new_cases) %>%
+    mutate(cum_cases_rep = round(cumsum(new_cases)/sum(new_cases)*100))
+
+## set analysis dates > 2015-01-01 to NA
+deliveries[which(deliveries$analysis_date>as.Date("2015-01-01")), "analysis_date"] <- NA
+deliveries$analysis_date <- as.character(deliveries$analysis_date)
+deliveries$delivery_date <- as.character(deliveries$delivery_date)
+colnames(deliveries) <- c("delivery date", "analysis date", "new", "cumulative")
+
+delivery_xtab <- xtable(deliveries, digits=0, label="tab:dates", align="ccccc",
+                        caption = "Dates of dengue data deliveries and analyses in 2014. For each delivery, the number of new cases delivered and the cumulative percent of total cases for the year is also shown. Analyses were run on the first day of each biweek only when new data was delivered in the previous biweek.")
+print(delivery_xtab, file="delivery-xtable.tex", hline.after=0, 
+      include.rownames = FALSE,
+      sanitize.text.function=function(x){x},
+      add.to.row=list(list(-1), 
+                      " && \\multicolumn{2}{c}{cases reported} \\\\"))
+@
+
+
+\subsection{Timing of predictions}
+While the predictions presented in this manuscript were made retrospectively, in 2015 when complete data were available, they were constructed to mimic real-time predictions by using only the data available at each analysis date in 2014. During the 2014 calendar year, predictions from a similar model were generated in real-time and disseminated to the Thai Ministry of Public Health. We chose the set of analysis dates as the first day of each biweek for which data had been delivered in the previous biweek (Supplementary Table 2). 
+For each analysis date in 2014, we used the candidate model to generate ``real-time'' province-level biweekly predictions for the subsequent 10 biweeks (5 months). 
+
+
+%\section{Methodology for predicting case counts}
+
+\subsection{Disease model: features and estimation}
+
+\subsubsection*{Statistical model}
+We assumed the biweekly province-level reported cases follow a Poisson distribution, where the previous biweek's reported cases serve as an offset term. 
+Let the number of cases with onset occurring within time interval $t$ in province $i$ be represented as a random variable $Y_{t,i}$, then
+\begin{eqnarray*}
+Y_{t,i} & \sim & Poisson(\lambda_{t,i} \cdot y_{t-1,i})
+\end{eqnarray*}
+where the lag-1 term $y_{t-1,i}$ is used as an offset in this model. We adopt the convention of using lower-case $y_{t,i}$ to indicate previously observed case counts that are treated as fixed inputs in our model.  We explicitly model the rate $\lambda$ as 
+\begin{eqnarray}
+\log \lambda_{t,i} & = & f_i(b(t)) + g_i(t) + \sum_{j\in \mathcal{C}} \sum_{k \in \mathcal{L}} \alpha_{j,k} \log \frac{y_{t-k,j}+1}{y_{t-k-1,j}+1} \label{eq:spamd-model}
+\end{eqnarray}
+where $\mathcal{C}$ is the set of $J$ most-correlated provinces with province $i$ and $\mathcal{L}$ is the set of lag times used in the model; $b(t)$ is the biweek of time $t$; $f_i(b(t))$ is assumed to be a province-specific cyclical cubic spline with period of one year (i.e. 26 biweeks); and $g_i(t)$ is a province-specific smooth spline to capture secular trends over time. Adding 1 to the numerator and denominator of the correlated province covariates ensures that the quantities are defined when no case counts are observed at a particular province-biweek. This method of adjusting for zero counts has been interpreted as an ``immigration rate'' added to each observation \cite{Zeger:1988up}. 
+
+We note that the model can be expressed as 
+\begin{equation}
+\lambda_{t,i} = \mathbb{E}\left [ \frac{Y_{t,i}}{y_{t-1,i}} | y_{t-1,i} \right ] \approx R_{t,i} \label{eq:spamd-Rt}
+\end{equation}
+which shows that $\lambda_{t,i}$ can be interpreted as the expected reproductive rate at time $t$ in location $i$, or $R_{t,i}$ \cite{Nishiura:2010jh}.
+
+These models were fit using the Generalized Additive Model (GAM) framework (i.e. as generalized linear models with smooth splines estimated by penalized maximum likelihood) \cite{Hastie:1990vg}, using the mgcv package for R \cite{wood2011, ihaka1996r}. Each province's time-series was subset to remove any cases from the previous $l$ biweeks. The remaining data were smoothed before fitting the model and making predictions.
+
+Seasonal patterns were modeled using a penalized cubic regression spline, constrained to have a cycle of one year with continuous second derivatives at the endpoints.
+Secular trends were modeled using penalized cubic splines with 5 equally spaced knots over 47 years (roughly one knot per decade).
+
+%{\bf Population dynamics}\\
+Information on epidemic progression elsewhere in the country was taken into account by including reported case counts at 1 lagged timepoint for the 3 most correlated provinces with province $i$ in the data used to fit the model.  Details of this model selection are provided in the appendix.
+
+%Each province considered itself as a possible province to choose but was not forced to include itself if other provinces showed higher correlation at the specified lag. %Three different methods were used to choose the number of correlated provinces and lagged timepoints to include. 
+%We chose the number of top correlated provinces and lagged timepoints based on the combination that minimized country-wide cross-validated error leaving out one-year-at-a-time between 2000 and 2010. We considered all possible combinations across a grid of 1 to 15 top correlated provinces and the following combination of lag times \{(1), (1,2), (1, 2, 3), (1, 2, 3, 4), (1, 2, 3, 4, 13), (1, 2, 3, 4, 13, 26) \}, where, for example, (1, 2, 3) refers to a model that included observations from top correlated provinces at lags of 1, 2, and 3 biweeks.  This process resulted in choosing 3 provinces at a 1 biweek lag (a complete assessment of performance on fully observed data is in preparation). %As shown in equation \ref{eq:spamd-model}, these data enter the model as ratios. For example, the covariate for the lag-$k$ biweek of province $j$ for predicting a count at time $t$ would be $\log \frac{y_{t-k,j}+1}{y_{t-k-1,j}+1}$.
+
+%\subsection{Generating a predictive distribution} \label{sec:predictions}
+%\subsubsection*{Simulating predicted counts}
+
+We approximated the predictive distribution for all provinces using sequential stochastic simulations of the joint distribution of the case counts for each province. We created $M$ independently evolving sequential chains of predictions by drawing, at each prediction time point, from the province-specific Poisson distribution with means given by equation (\ref{eq:spamd-model}). For example, if data through time $t^*$ was used to fit the models for all locations, then a single simulated prediction consisted of a simulated Markov chain of dependent observations for timepoints $t^*+1$, $t^*+2$, ..., $t^*+H$, across all provinces, where H was the largest horizon considered.  To make a prediction for province $i$ at time $t^*+h$ in the $m^{th}$ chain, we draw $$\hat y^m_{t^*+h, i} \sim Poisson(\hat \lambda^m_{t^*+h,i}\cdot \hat y^m_{t^*+h-1,i})$$ where $ \hat\lambda^m_{t^*+h,i}$ is computed directly by plugging in the observed and predicted data prior to $t^*+h$ to the fitted model, and we use observed case data in the first step of prediction, i.e. $\hat y^m_{t^*,i} = y_{t^*,i}$ for all $m$.  Due to the assumed interrelations between the provinces, we simulated counts for all provinces at a single timepoint before moving on to the next timepoint.  For a given prediction horizon $h$, this process generates an empirical posterior predictive distribution for each province by evaluating the $M$ different predictions for $y_{t^*+h,i}$. Prediction intervals are generated by taking quantiles (e.g., the 2.5\% and 97.5\%) of this distribution. 
+
+
+\subsection{Metrics for evaluating predictions}
+We used several different metrics for evaluating our predicted case counts. We calculated Spearman correlation coefficients to measure the agreement between predicted and observed values. We also calculated the mean absolute error (MAE) by aggregating across analysis times within a given province. We computed the relative mean absolute error (relative MAE) comparing the predictions for a given province to predictions from a seasonal median baseline model. The seasonal baseline model for a given province is the median value of previously observed counts for the given biweek in that province over the past 10 years. The use of absolute error metrics over squared error metrics has been encouraged to enhance interpretability \cite{Hyndman:2006dt,Reich:2AH3z5zJ}. Additionally, we calculated empirical 95\% prediction interval coverage as the fraction of times the 95\% prediction interval covered the true value.
+% \begin{itemize}
+% \item Correlation coefficients
+% \item Relative MAE vs. seasonal and vs. last observation
+% \item Total observed annual cases vs. predictions from pre-high season
+% \item CI coverage
+% % \item Number of biweeks with an outbreak during high season
+% % \item For provinces with outbreaks, the sensitivity of outbreak predictions 0, 2, and 4 weeks ahead of time
+% % \item For all provinces, the log score for peak biweek projections, by analysis date
+% % \item Whether or not the model correctly predicted the peak week (and +/- k weeks)
+% \end{itemize}
+
+
+\subsection{Real-time vs. full-data predictions}
+We evaluated the performance of our real-time forecasts against predictions that could have been made had a full dataset been available at the analysis dates. To make this comparison, we ran a set of multi-step forecasts for 2014 at each analysis date using the complete data for 2014 that was finalized in late April 2015.
+We designed this experiment to focus on two comparisons. First, we aimed to compare real-time and full-data predictions where the multi-step predictions began at the same timepoint (Figure \ref{fig:nowcast-schematic}A vs. \ref{fig:nowcast-schematic}B). This analysis addressed the question of how much the real-time predictions were impacted by the delays in case reporting, even after beginning the predictions 3 months in the past. 
+Second, we aimed to compare, by horizon, the real-time and full-data predictions where the origin of the multi-step full-data predictions was anchored at the analysis time but the origin of the real-time predictions was 6 biweeks earlier to account for delayed reporting of case data (Figure \ref{fig:nowcast-schematic}A vs. \ref{fig:nowcast-schematic}C). This analysis addressed the question of how much better or worse our model would have performed if full data were available without any delays.
+
+<<aggregate-case-data>>=
+country_level_case_data <- dhf_data %>%
+    group_by(date_sick_year, date_sick_biweek) %>%
+    summarize(case_count = sum(case_count, na.rm=TRUE)) %>%
+    ungroup() %>%
+    mutate(date_sick = biweek_to_date(date_sick_biweek, date_sick_year))
+province_level_case_data <- dhf_data %>%
+    group_by(FIPS, date_sick_year, date_sick_biweek) %>%
+    summarize(case_count = sum(case_count, na.rm=TRUE)) %>%
+    ungroup() %>%
+    mutate(date_sick = biweek_to_date(date_sick_biweek, date_sick_year)) %>%
+    left_join(thai_prov_data)
+@
+
+
+<<step1-forecasts, fig.cap="Country-wide real-time predictions for incident dengue hemorrhagic fever. Red lines show predicted case counts, black bars show cases reported by the end of the 2014 reporting period. The three figures show (top to bottom) one-, two-, and three-biweek ahead predictions. So, for example, every dot on the top graph is a one-biweek ahead real-time prediction made from all available data at the time of analysis.", fig.show='hide'>>=
+ks <- -6:-4
+plots <- vector("list", length(ks))
+for(i in 1:length(ks)){
+    txt_step <- (ks[i]+7)*2
+    cntry_preds_one_step<- biweekly_preds %>% 
+        filter(step==ks[i]) %>%
+        group_by(date_sick_year, date_sick_biweek) %>%
+        summarize(obs_count=sum(obs_count),
+                  pred_count=sum(pred_median),
+                  pred_ub=sum(pred_ub),
+                  pred_lb=sum(pred_lb))
+    plots[[i]] <- ggplot(cntry_preds_one_step, aes(x=biweek_to_date(date_sick_biweek, date_sick_year))) +
+        geom_line(aes(y=pred_count), color="red") +
+        geom_point(aes(y=pred_count), color="red") +
+        geom_linerange(aes(x=date_sick, ymax=case_count, ymin=0), data=country_level_case_data) +
+        geom_ribbon(aes(ymin=pred_lb, ymax=pred_ub), alpha=.2) + 
+        scale_x_date(limits = c(as.Date("2014-01-01"), as.Date("2014-12-01")), 
+                     labels = date_format("%d-%b"), expand = c(.01, .01),
+                     breaks = date_breaks("months"), name="time when cases occurred in 2014") +
+        scale_y_continuous(limits = c(0, 5500), name="case counts") +
+        annotate("text", x = as.Date("2014-03-01"), y = 4500, 
+                 label = paste(txt_step, "week horizon"))
+}
+grid.arrange(plots[[1]], plots[[2]], plots[[3]], ncol=1)
+@
+
+
+<<relative-mae-calculations>>=
+biweek_rel_MAE_results <- calculate_biweekly_rel_MAE(biweekly_preds,
+                                                     denom = "seasonal",
+                                                     min_obs = 2,
+                                                     vars = c("province", "step"))
+sorted_relMAE <- biweek_rel_MAE_results %>% 
+    group_by(pid) %>% 
+    summarize(mean_relMAE = mean(rel_MAE)) %>% 
+    arrange(mean_relMAE) %>% 
+    rename(FIPS=pid)
+@
+
+
+<<labeling-for-forecasts>>=
+rects <- data.frame(xmin=c(0, 0, 0), 
+                    xmax=c(1, 1, 1), 
+                    ymin=c(0, 10, 20),
+                    ymax=c(9.5, 19.5, 29))
+
+model_labels <- data.frame(x=1.01, 
+                           y=c(4.5, 14.5, 24.5),
+                           model_label=c("worst", "middle", "best"))
+
+plot_labels <- ggplot(rects) + 
+    geom_rect(aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax), 
+              fill="white", linetype=1, color="black") +
+    coord_cartesian(xlim=c(.98, 1.1), ylim=c(-2, 30)) +
+    geom_text(data=model_labels, aes(x=x, y=y, label=model_label), hjust=0) + 
+    theme_minimal() +
+    theme(axis.text=element_blank(),
+          axis.ticks=element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank(),
+          plot.margin=unit(c(0,0,0,-.5), "cm")) +
+    scale_y_continuous(name=element_blank()) +
+    scale_x_continuous(name=element_blank()) 
+@
+
+
+<<province-specific-forecasts, fig.height=10, fig.width=9, fig.cap="Ten-step forward predictions made at two time-points in 2014. Results for nine provinces are shown, representing (from top to bottom) the best three provinces, the middle three, and the worst three performing provinces in terms of relative mean absolute error when compared to a seasonal baseline model.", fig.show='hide'>>=
+## Goal: choose 9 provinces for which to show forecasts from two timepoints
+## Provinces chosen based on relMAE vs. seasonal model: 2 best, 2 middle, 2 worst
+
+chosen_provs <- unlist(sorted_relMAE[c(1:3, 37:39, 74:76), "FIPS"])
+an_dates <- c("2014-07-16", "2014-10-22")
+
+plots <- vector("list", 2)
+for(i in 1:2){
+    ## make dataset with one analysis date and only chosen provinces
+    prov_preds_one_analysis_date<- biweekly_preds %>% 
+        filter(analysis_date == an_dates[i], pid %in% chosen_provs) %>%
+        group_by(pid, date_sick_year, date_sick_biweek) %>%
+        summarize(obs_count=sum(obs_count),
+                  pred_count=sum(pred_median),
+                  pred_ub=sum(pred_ub),
+                  pred_lb=sum(pred_lb)) %>%
+        ungroup() %>%
+        rename(FIPS=pid)
+    
+    ## all province data in one spot
+    province_level_data <- province_level_case_data %>%
+        left_join(prov_preds_one_analysis_date) %>%
+        left_join(sorted_relMAE) %>%
+        mutate(prov_ordered = reorder(Province, mean_relMAE)) %>%
+        filter(FIPS %in% chosen_provs, date_sick_year == 2014)  
+    
+    ## make the plot
+    if(i==1) {
+        plots[[i]] <- ggplot(province_level_data, aes(x=date_sick)) +
+            geom_vline(xintercept=as.numeric(as.Date(an_dates[i])), linetype=2, color="gray") +
+            geom_line(aes(y=pred_count), color="red") +
+            geom_point(aes(y=pred_count), color="red") +
+            geom_linerange(aes(ymax=case_count, ymin=0)) +
+            geom_ribbon(aes(ymin=pred_lb, ymax=pred_ub), alpha=.2) + 
+            scale_x_date(limits = c(as.Date("2014-01-01"), as.Date("2014-12-20")), 
+                         labels = date_format("%d-%b"), expand = c(.03, .03),
+                         breaks = date_breaks("months"), name="time when cases occurred in 2014") +
+            scale_y_continuous(name="case counts") +
+            coord_cartesian(ylim=c(0, 75)) +
+            facet_grid(prov_ordered~., scales = "free_y") +
+            theme(axis.text.x  = element_text(angle=90, vjust=0.5),
+                  strip.background = element_blank(),
+                  strip.text.y = element_blank(),
+                  plot.margin=unit(c(0,0.1,0,0), "cm")) +
+            ggtitle(paste(an_dates[i], "predictions"))
+    } else if(i==2) {
+        plots[[i]] <- ggplot(province_level_data, aes(x=date_sick)) +
+            geom_vline(xintercept=as.numeric(as.Date(an_dates[i])), linetype=2, color="gray") +
+            geom_line(aes(y=pred_count), color="red") +
+            geom_point(aes(y=pred_count), color="red") +
+            geom_linerange(aes(ymax=case_count, ymin=0)) +
+            geom_ribbon(aes(ymin=pred_lb, ymax=pred_ub), alpha=.2) + 
+            scale_x_date(limits = c(as.Date("2014-01-01"), as.Date("2014-12-31")), 
+                         labels = date_format("%d-%b"), expand = c(.03, .03),
+                         breaks = date_breaks("months"), name="time when cases occurred in 2014") +
+            scale_y_continuous(name=element_blank()) +
+            coord_cartesian(ylim=c(0, 75)) +
+            facet_grid(prov_ordered~., scales = "free_y") +
+            theme(axis.text.x  = element_text(angle=90, vjust=0.5),
+                  strip.text.y = element_text(angle = 0 ),
+                  axis.ticks.y = element_blank(), axis.text.y = element_blank(),
+                  plot.margin=unit(c(0,.5,0,-.5), "cm")) +
+            ggtitle(paste(an_dates[i], "predictions" ))
+    }
+}
+grid.arrange(plots[[1]], plots[[2]], plot_labels, 
+             ncol=3, widths=c(1, 1.2, .6))
+@
+
+
+<<outbreak-map, eval=FALSE, fig.width=8, fig.height=3.5, fig.cap="Model-estimated outbreak probabilities for each province. Both plots show 1-step ahead predictions after discarding the most recent 6 biweeks of data for incompleteness. The left panel has an analysis date of 2014-07-16 and the right panel of 2014-10-22.">>=
+gpclibPermit()
+p1 <- plot_outbreak_map(biweekly_preds, biweek_to_plot = 9, analysis_date = "2014-07-16", include_legend = FALSE, plot_type = "outbreak")
+p2 <- plot_outbreak_map(biweekly_preds, biweek_to_plot = 16, analysis_date = "2014-10-22", include_legend = TRUE, plot_type = "outbreak")
+grid.arrange(p1, p2, ncol=2)
+@
+
+
+
+<<outbreak-prob-sensitivity>>=
+eval_tables <- forecast_evaluation(counts = biweek_eval_data$formatted_data,
+                                   forecasts = biweek_eval_data$formatted_forecasts,
+                                   season_start = 8,
+                                   season_end = 22,
+                                   seasons = 2014,
+                                   trail_years = 10,
+                                   to_date_lag = 6,
+                                   biweekly_data = biweek_eval_data$biweekly_data,
+                                   k = 2)
+@
+
+
+<<relative-mae, fig.height=10, fig.width=8.5, fig.cap="Relative mean absolute error (MAE) comparing our prediction model vs. a model that predicts a seasonal average, by province and step forward (in biweeks).", fig.show='hide'>>=
+
+biweek_rel_MAE_results$forecast <- factor(biweek_rel_MAE_results$step>=0, labels=c("nowcast", "forecast"))
+
+biweek_rel_MAE_results_seas <- left_join(biweek_rel_MAE_results, thai_prov_data, by=c("pid" = "FIPS"))
+biweek_rel_MAE_results_seas$step_fac <- biweek_rel_MAE_results_seas$step + 7
+biweek_rel_MAE_results_seas$Province <- reorder(biweek_rel_MAE_results_seas$Province, biweek_rel_MAE_results_seas$Population)
+
+mypal <- colorRampPalette( brewer.pal( 6 , "Blues" ) )
+qplot(data = filter(biweek_rel_MAE_results_seas), 
+      x = rel_MAE, y = Province, color = factor(step_fac), shape=forecast) + 
+    #facet_grid(MOPH_Admin_Code~., space="free", scales="free") +
+    geom_vline(aes(xintercept = 1), linetype = "dashed") +theme_bw() + 
+    scale_x_log10(breaks=c(.2, .5, 1, 2, 5, 10)) + 
+    scale_shape(name="forecast type") +
+    scale_colour_manual(values = mypal(12)[12:3], name="forecast step") +
+    xlab("relative MAE (vs. seasonal baseline)") + ylab("") +
+    theme(panel.margin = unit(0, "lines"))
+@
+
+
+
+
+<<mae-calculations, fig.height=10, fig.width=8.5, fig.cap="Mean absolute error (MAE) of our prediction model by province and step forward (in biweeks).", fig.show='hide'>>=
+biweek_MAE <- biweekly_preds %>% 
+    group_by(pid, step) %>%
+    summarize(MAE = mean(AE_pred)) %>% 
+    ungroup() %>%
+    mutate(forecast = factor(step>=0, labels=c("nowcast", "forecast")),
+           step_fac = step+7) %>%
+    left_join(thai_prov_data, by=c("pid" = "FIPS")) %>%
+    mutate(Province = reorder(Province, Population))
+
+ggplot(biweek_MAE, aes(x = MAE, y = Province, color = factor(step_fac), shape=forecast)) +
+    geom_point() +
+    scale_x_log10(breaks=c(.5, 1, 2, 5, 10, 100)) + 
+    scale_shape(name="forecast type") +
+    scale_colour_manual(values = mypal(12)[12:3], name="forecast step") +
+    xlab("MAE of model predictions") + ylab("") +
+    theme(panel.margin = unit(0, "lines"))
+@
+
+
+
+
+<<performance-analysis, fig.show='hide', results='hide'>>=
+## calculate how many years of data for each province
+how_many_years <- dhf_data %>% group_by(FIPS) %>% 
+    summarize(first_year = min(date_sick_year),
+              num_years = max(date_sick_year) - first_year + 1)
+
+## calculate province delays
+province_delays <- 
+    dhf_data %>% filter(!is.na(delivery_date)) %>%
+    mutate(date_sick = biweek_to_date(date_sick_biweek, date_sick_year), ## fix date sick
+           delivery_lag = as.numeric(difftime(delivery_date, date_sick, units="weeks")),
+           delivery_lag_gte6bw = factor(delivery_lag >= 12, levels=c(FALSE, TRUE), labels=c("lag_lt6bw", "lag_gte6bw"))) %>%
+    group_by(FIPS, delivery_lag_gte6bw) %>%
+    summarize(case_count = sum(case_count, na.rm=TRUE)) %>%
+    ungroup() %>% 
+    spread(key = delivery_lag_gte6bw, value=case_count) %>%
+    mutate(total_2014_cases = lag_lt6bw + lag_gte6bw,
+           frac_deliv_gte6bw = lag_gte6bw/total_2014_cases)
+
+## calculate average number of cases per year
+prov_cases_per_year <- dhf_data %>% filter(!is.na(case_count)) %>%
+    group_by(FIPS, date_sick_year) %>% 
+    summarize(total_annual_cases = sum(case_count, na.rm=TRUE)) %>%
+    group_by(FIPS) %>% 
+    summarize(median_annual_cases = median(total_annual_cases)) 
+
+## merge all data
+performance_summary <- biweek_rel_MAE_results %>% 
+    filter(step==-6) %>% dplyr::select(pid, rel_MAE) %>%
+    left_join(thai_prov_data, by = c("pid" = "FIPS")) %>%
+    mutate(pop_density = Population/Area_km) %>%
+    left_join(how_many_years, by = c("pid" = "FIPS")) %>%
+    left_join(province_delays, by = c("pid" = "FIPS")) %>%
+    left_join(prov_cases_per_year, by = c("pid" = "FIPS")) %>%
+    left_join(prov_seasonalities, by = c("province" = "prov_num")) %>%
+    mutate(diff_from_median_2014 = total_2014_cases - median_annual_cases,
+           pct_diff_from_median_2014 = diff_from_median_2014/median_annual_cases,
+           ratio_2014_to_median = total_2014_cases/median_annual_cases)
+    
+p1 <- qplot(total_2014_cases, rel_MAE, data=performance_summary) + 
+    scale_x_log10() + xlab("total cases observed in 2014") + ylab("") + 
+    coord_cartesian(ylim=c(0, 2)) +
+    geom_smooth(span=1) + 
+    geom_hline(yintercept=1, linetype=2) 
+p2 <-  qplot(ratio_2014_to_median, rel_MAE, data=performance_summary) + 
+    coord_cartesian(ylim=c(0, 2)) +
+    geom_smooth(span=1) + ylab("") + 
+    xlab("2014 tot cases/median tot cases") + scale_x_log10()+ 
+    geom_hline(yintercept=1, linetype=2)
+p3 <-  qplot(seasonality, rel_MAE, data=performance_summary) + 
+    coord_cartesian(ylim=c(0, 2)) +
+    geom_smooth(span=1) + ylab("1-step relMAE vs seasonal model") + 
+    xlab("seasonality")+ 
+    geom_hline(yintercept=1, linetype=2)
+p4 <-  qplot(resid_sd_seas, rel_MAE, data=performance_summary) + 
+    coord_cartesian(ylim=c(0, 2)) +
+    geom_smooth(span=1) + ylab("") + 
+    xlab("sd of residuals, seasonal model")+ 
+    geom_hline(yintercept=1, linetype=2)
+p5 <-  qplot(frac_deliv_gte6bw, rel_MAE, data=performance_summary) + 
+    coord_cartesian(ylim=c(0, 2)) +
+    geom_smooth(span=1) + ylab("") + xlab("% reporting delay > 6 biweeks")+ 
+    geom_hline(yintercept=1, linetype=2)
+p6 <-  qplot(pop_density, rel_MAE, data=performance_summary) + 
+    scale_x_log10() +
+    coord_cartesian(ylim=c(0, 2)) +
+    geom_smooth(span=1) + ylab("") + xlab("population density")+ 
+    geom_hline(yintercept=1, linetype=2)
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol=2)
+    
+performance_model <- glm(rel_MAE ~ frac_deliv_gte6bw + log(total_2014_cases) + log(median_annual_cases) + seasonality + pop_density, family="poisson", data=performance_summary)
+
+performance_gam <- gam(rel_MAE ~ s(ratio_2014_to_median, k=3) + 
+                           s(median_annual_cases, k=3) + 
+                           s(seasonality, k=3) + s(resid_sd_seas, k=3) + 
+                           s(frac_deliv_gte6bw, k=3) +  s(pop_density, k=3),
+                       family=poisson, 
+                       data=performance_summary, keep_data=TRUE)
+
+par(mfrow=c(3,2))
+plot(performance_gam, select=1)
+abline(h=0, lty=3)
+plot(performance_gam, select=2)
+abline(h=0, lty=3)
+plot(performance_gam, select=3)
+abline(h=0, lty=3)
+plot(performance_gam, select=4)
+abline(h=0, lty=3)
+plot(performance_gam, select=5)
+abline(h=0, lty=3)
+plot(performance_gam, select=6)
+abline(h=0, lty=3)
+summary(performance_gam)
+
+#performance_model <- glm(rel_MAE_median ~ frac_deliv_gte6bw +  seasonality + pop_density, family="poisson", data=performance_summary)
+#summary(performance_model)
+#plot(performance_model)
+@
+
+<<province-description-table, results='hide'>>=
+prov_descriptions <- performance_summary %>%
+    dplyr::select(#region = MOPH_Admin_Code,
+           ID = pid,
+           name = Province,
+           pop = Population,
+           median_annual_cases,
+           total_2014_cases,
+           pct_deliv_gte6bw = frac_deliv_gte6bw) %>%
+    mutate(pct_deliv_gte6bw = 100*pct_deliv_gte6bw,
+           median_annual_cases = prettyNum(round(median_annual_cases), big.mark=","),
+           total_2014_cases = prettyNum(total_2014_cases, big.mark=","),
+           pop = prettyNum(pop, big.mark=",")) %>%
+    #arrange(region, pop)
+    arrange(desc(pop))
+
+colnames(prov_descriptions) <- c("id", "name", "pop'n", "median annual cases", "total 2014 cases", "\\% cases delivered $\\geq$ 6 biweeks")
+
+prov_descriptions_xtab <- xtable(prov_descriptions, digits=rep(0, 7), label="tab:province-descriptors", 
+                                 align="ccccccc",
+                        caption = "Summary data on all 77 provinces of Thailand.")
+print(prov_descriptions_xtab, 
+      file='prov-description-table.tex',
+      hline.after=0, include.rownames = FALSE,
+      sanitize.text.function=function(x){x}, scalebox='0.65')
+@
+
+
+
+<<results-table-by-horizon, results='hide'>>=
+results_by_horizon <- biweek_rel_MAE_results_seas %>%
+    mutate(horizon=step+7) %>%
+    group_by(horizon) %>%
+    summarize(R2 = cor(obs_count, pred, method='spearman'),
+              PI_coverage = mean(obs_count<=ub & obs_count>=lb),
+              p05_relMAE = quantile(rel_MAE, prob=.05, na.rm=TRUE),
+              p25_relMAE = quantile(rel_MAE, prob=.25, na.rm=TRUE),
+              med_relMAE = median(rel_MAE, na.rm=TRUE),
+              p75_relMAE = quantile(rel_MAE, prob=.75, na.rm=TRUE),
+              p95_relMAE = quantile(rel_MAE, prob=.95, na.rm=TRUE))
+
+results_by_horizon_xtab <- results_by_horizon
+colnames(results_by_horizon_xtab) <- c("horizon (h)", "$R^2$", "95\\% PI coverage", "$Q_5$", "$Q_{25}$", "$Q_{50}$ (median)", "$Q_{75}$", "$Q_{95}$")
+results_by_horizon_xtab <- xtable(results_by_horizon_xtab, digits=c(0, 0, rep(2,7)), label="tab:results-by-horizon", align="cc|cc|ccccc",
+                        caption = "Summary of real-time prediction accuracy, by prediction horizon. These results are aggregated across all provinces. The $R^2$ and 95\\% PI coverage columns present the overall correlation coefficient and prediction interval coverage. The relative MAE columns show five quantiles of the distribution of province-level relative MAEs comparing the real-time model at the given horizon to a seasonal baseline model at the given horizon: $Q_5$ (the 5$^{th}$ percentile), $Q_{25}$ ($25^{th}$ percentile), $Q_{50}$ (median), $Q_{75}$ ($75^{th}$ percentile), and $Q_{95}$ (the 95th percentile). The relative MAEs were calculated as the MAE from the real-time predictions divided by the MAE from the seasonal average predictions, therefore values larger than 1 indicate that the real-time models showed more absolute error on average than the seasonal models.")
+@
+
+
+
+
+\section{Results}
+%\section{Forecast results from 2014}
+
+\subsection{Summary of province-level forecasts}
+
+%[Absolute error summary] 
+In general, the model predictions showed good, if overconfident, performance at short horizons but less accuracy and high uncertainty at longer horizons. Across all provinces, the correlation between observed and predicted values was \Sexpr{round(results_by_horizon[1,"R2"], 2)} at a horizon of 1 biweek (2 weeks) and \Sexpr{round(results_by_horizon[10,"R2"], 2)} at a horizon of 10 biweeks, or approximately 5 months (see Table \ref{tab:results-by-horizon}). Across all provinces, observed 95\% prediction interval coverage was lower than expected at horizons of 1 and 2 biweeks (\Sexpr{round(results_by_horizon[1,"PI_coverage"]*100)}\% and \Sexpr{round(results_by_horizon[2,"PI_coverage"]*100)}\%, respectively), showing that the models were overconfident in their short-term predictions. This prediction interval coverage increased to 99\% at a 3 biweek (6 week) prediction horizon, and remained at that level for longer horizons. This indicates that our models often had an abundance of uncertainty at mid- and long-term horizons. Figure \ref{fig:step1-forecasts} shows case counts and predictions aggregated across all provinces at horizons of 1, 2, and 3 biweeks (2, 4, and 6 weeks).   
+
+Figure \ref{fig:province-specific-forecasts} shows examples of multi-step predictions from two analysis dates in 2014. We show the results from nine distinct provinces, representing the best three provinces, the middle three provinces, and the worst three provinces in terms of relative MAE when compared to a seasonal baseline model. The increasing uncertainty is visible in many cases, even when the point-predictions remain close to the true values. The explosive forecasts tended to occur more frequently in the early- and mid-season, when the historical seasonal trend rises and when the observed case counts tend to be increasing from one biweek to the next.
+
+% code for MAE calculations below:
+% biweek_MAE %>% group_by(step_fac) %>% summarize(lt10=sum(MAE<10))
+
+%[Relative error summary]  
+There was substantial variation in predictive performance across provinces. Mean absolute error (MAE) for predictions tended to be larger in provinces with higher populations (Figure \ref{fig:mae}), and also tended to increase with the forecast horizon. The observed MAE was less than 10 cases in over 75\% of provinces at one time step and in over 50\% of provinces at up to 8 time steps. Figure \ref{fig:relative-mae} shows the relative MAE of model predictions compared to a seasonal baseline model at prediction horizons of 1 through 10 biweeks (2 weeks through 5 months). We note that predictions during the first three months are nowcasts, as the most recent 6 biweeks of data are ignored in the fitting process and predictions are made starting from the point at which full data was assumed. 
+
+To compare predictive performance of our model between provinces, we used the relative MAE with a simple seasonal model as a baseline. Table \ref{tab:results-by-horizon} summarizes relative MAEs by prediction horizon.  Relative to seasonal baseline prediction models, a majority of provinces made better predictions on average than the seasonal model at 1, 2, and 3 biweek (2, 4, and 6 week) prediction horizons (i.e. up to 1.5 months from the starting point of the predictions). Up to about 5 months from the origin of the multi-step predictions (and two months from the analysis time), over 25\% of province-specific models made predictions that were on average better than the seasonal baseline model. Some province-specific models showed substantially worse predictions when compared to a seasonal baseline at these longer prediction horizons. No single province feature (e.g. total average cases, strength of seasonal trends, population size, season-to-season variation) was able to explain the substantial variations in performance, highlighting the challenges of creating a unified modeling framework for a set of varied locations (see appendix for details).   
+
+%[Model diagnostic summary] 
+% Despite treating the past 6 biweeks (approximately 3 months) as completely unobserved data, many provinces showed sensitivity to partially observed case counts serving as covariates for prediction.  Explosive forecasts were observed  ... [Give some stats on when and where the explosive forecasts happened]
+
+
+
+
+
+<<gam-plots, results='hide', fig.show='hide', eval=FALSE>>=
+EvaluateSmooths <- function(model, select=NULL, x=NULL, n=100) {
+    if (is.null(select)) {
+        select = 1:length(model$smooth)
+    }
+    do.call(rbind, lapply(select, function(i) {
+        smooth = model$smooth[[i]]
+        data = model$model
+        
+        if (is.null(x)) {
+            min = min(data[smooth$term])
+            max = max(data[smooth$term])
+            x = seq(min, max, length=n)
+        }
+        if (smooth$by == "NA") {
+            by.level = "NA"
+        } else {
+            by.level = smooth$by.level
+        }
+        range = data.frame(x=x, by=by.level)
+        names(range) = c(smooth$term, smooth$by)
+        
+        mat = PredictMat(smooth, range)
+        par = smooth$first.para:smooth$last.para
+        
+        y = mat %*% model$coefficients[par]
+        
+        se = sqrt(rowSums(
+            (mat %*% model$Vp[par, par, drop = FALSE]) * mat
+        ))
+        
+        return(data.frame(label=smooth$label,
+                          x.var=smooth$term,
+                          x.val=x,
+                          by.var=smooth$by,
+                          by.val=by.level,
+                          value = y,
+                          se = se)
+        )
+    }))
+}
+
+plot_idx=4
+smooths <- EvaluateSmooths(performance_gam, select = plot_idx)
+ggplot(smooths, aes(exp(x.val), exp(value + performance_gam$coefficients[1]))) +
+    geom_line() +
+    geom_line(aes(y=exp(value + 2*se + performance_gam$coefficients[1])), linetype="dashed") +
+    geom_line(aes(y=exp(value - 2*se + performance_gam$coefficients[1])), linetype="dashed") +
+    coord_cartesian(ylim=c(0, 20))
+
+# ## run another analysis
+# performance_summary_2 <- filter(pred_comparison_df, horizon==1) %>%
+#     select(pid,
+#            full_v_rt_relmae_hor1 = full_v_rt_relmae) %>%
+#     left_join(performance_summary)
+# 
+# qplot(frac_deliv_gte6bw, full_v_rt_relmae_hor1, data=performance_summary_2) + scale_y_log10() + geom_smooth(method="lm")
+# 
+# performance_gam <- gam(full_v_rt_relmae_hor1 ~ s(frac_deliv_gte6bw, k=2) + s(diff_from_median_2014, k=2) + s(log10(median_annual_cases), k=2) + s(seasonality, k=2) + s(log10(pop_density), k=2), family="poisson", data=performance_summary_2, keep_data=TRUE)
+# 
+# performance_gam_2 <- gam(full_v_rt_relmae_hor1 ~ s(frac_deliv_gte6bw, k=2) , family="poisson", data=performance_summary_2, keep_data=TRUE)
+# 
+# 
+# par(mfrow=c(2,2))
+# plot(performance_gam, select=1)
+# abline(h=0, lty=3)
+# plot(performance_gam, select=2)
+# abline(h=0, lty=3)
+# plot(performance_gam, select=3)
+# abline(h=0, lty=3)
+# plot(performance_gam, select=4)
+# abline(h=0, lty=3)
+# 
+# summary(performance_gam)
+# 
+# plot_idx=1
+# smooths <- EvaluateSmooths(performance_gam_2, select = plot_idx)
+# ggplot(smooths, aes((x.val), exp(value + performance_gam$coefficients[1]))) +
+#     geom_line() +
+#     geom_line(aes(y=exp(value + 2*se + performance_gam$coefficients[1])), linetype="dashed") +
+#     geom_line(aes(y=exp(value - 2*se + performance_gam$coefficients[1])), linetype="dashed") +
+#     coord_cartesian(ylim=c(0, 12)) + geom_hline(yintercept=1, linetype=2) 
+# 
+
+@
+
+<<prov-performance-comparison, results='hide'>>=
+fulldata_preds <- ungroup(fulldata_biweekly_preds) %>%
+    mutate(forecast_horizon = step+7) %>%
+    dplyr::select(pid, analysis_date, date_sick_year, date_sick_biweek, forecast_horizon,
+           fulldata_pred = pred_median,
+           fulldata_pred_ub = pred_ub,
+           fulldata_pred_lb = pred_lb,
+           fulldata_ae = AE_pred)
+
+pred_comparison_df <- left_join(ungroup(biweekly_preds), fulldata_preds) %>%
+    #select(pid, analysis_date, date_sick_year, date_sick_biweek, step, forecast_horizon, obs_count, pred_median, fulldata_pred, AE_pred, fulldata_ae)
+    group_by(pid, forecast_horizon) %>%
+    #group_by(forecast_horizon) %>%
+    summarize(fulldata_mae = mean(fulldata_ae),
+              realtime_mae = mean(AE_pred),
+              full_v_rt_relmae = realtime_mae/fulldata_mae) %>%
+    ungroup() %>%
+    left_join(dplyr::select(performance_summary, pid, frac_deliv_gte6bw, Population, median_annual_cases))
+
+#ggplot(pred_comparison_df, aes(x=full_v_rt_relmae, y=pid, color=horizon))  + geom_point() + geom_vline(xintercept=1, linetype=2)
+
+
+fulldata_horizon_summary <- pred_comparison_df %>%
+    group_by(forecast_horizon) %>%
+    summarize(p05_relMAE = quantile(full_v_rt_relmae, prob=.05, na.rm=TRUE),
+              p25_relMAE = quantile(full_v_rt_relmae, prob=.25, na.rm=TRUE),
+              med_relMAE = median(full_v_rt_relmae, na.rm=TRUE),
+              p75_relMAE = quantile(full_v_rt_relmae, prob=.75, na.rm=TRUE),
+              p95_relMAE = quantile(full_v_rt_relmae, prob=.95, na.rm=TRUE))
+colnames(fulldata_horizon_summary) <- c("horizon", "$Q_5$", "$Q_{25}$", "$Q_{50}$ (median)", "$Q_{75}$", "$Q_{95}$")
+
+fulldata_horizon_xtab <- xtable(fulldata_horizon_summary, digits=c(0, 0, rep(2,5)), label="tab:fulldata-horizon", align="cc|ccccc",
+                        caption = "Comparison of province-level prediction accuracy between full-data and real-time predictions, by prediction horizon. These calculations assume that both the full-data and real-time multi-step predictions began at the same time. The table shows the 5th percentile ($Q_5$), 25th percentile ($Q_{25}$), median ($Q_{50}$), 75th percentile ($Q_{75}$), and 95th percentile  ($Q_{95}$) value of the relative MAE from each province at the given horizon. The relative MAEs were calculated as the MAE from the real-time predictions divided by the MAE from the full-data predictions, i.e. values larger than 1 indicate that the real-time models showed more absolute error on average than the full-data models.")
+@
+
+<<plotting-prediction-comparisons, fig.show='hide', fig.height=4, fig.width=7, fig.cap="Comparison of real-time and full-data prediction error at a prediction horizon of 1, assuming that the full-data predictions were starting from the same time as the real-time forecasts. Each province is represented by a line and the provinces are sorted by MOPH health region. A line that has a positive slope indicates that the province showed ">>=
+# ggplot(filter(pred_comparison_df, forecast_horizon==1), 
+#        aes(x=frac_deliv_gte6bw, y=full_v_rt_relmae))  + 
+#     geom_point(aes(size=log10(median_annual_cases))) + geom_smooth(se=FALSE)+ geom_hline(yintercept=1, linetype=2) +
+#     scale_y_log10()
+# 
+# ggplot(filter(pred_comparison_df, forecast_horizon==1), 
+#        aes(x=median_annual_cases, y=full_v_rt_relmae))  + 
+#     geom_point(aes(size=frac_deliv_gte6bw)) + geom_smooth(se=FALSE)+ geom_hline(yintercept=1, linetype=2) +
+#     scale_y_log10() + scale_x_log10()
+
+## make linegraph
+pred_comp_2 <- filter(pred_comparison_df, forecast_horizon==1) %>%
+    select(pid, fulldata=fulldata_mae, realtime=realtime_mae) %>%
+    gather(model, mae, -pid) %>%
+    left_join(select(thai_prov_data, FIPS, MOPH_Admin_Code), by=c("pid" = "FIPS"))
+ggplot(pred_comp_2, aes(x=model, y=mae, group=pid)) + geom_line() + 
+    scale_y_log10() + facet_grid(.~MOPH_Admin_Code) +
+    theme(axis.text.x  = element_text(angle=90, vjust=0.5), 
+          axis.title.x=element_blank()) +
+    ylab("Mean Absolute Error (MAE)") +
+    ggtitle("Comparison of real-time and full-data prediction error, by MOPH health region")
+
+@
+
+
+<<absolute-horizon-summary, results='hide', fig.show='hide'>>=
+## need to subset to forecasts from analysis dates that have all steps 
+# adate_candidates <- unique(fulldata_preds$analysis_date)
+# idx <- rep(NA, length(adate_candidates))
+# for(i in 1:length(adate_candidates))
+
+absolute_horizon_summary_fd <- pred_comparison_df %>%
+    mutate(absolute_horizon = forecast_horizon) %>%
+    select(pid, absolute_horizon, fulldata_mae)
+
+absolute_horizon_summary_rt <- pred_comparison_df %>%
+    mutate(absolute_horizon = forecast_horizon-6) %>%
+    filter(absolute_horizon > 0) %>%
+    select(pid, absolute_horizon, realtime_mae) 
+
+absolute_horizon_summary_both <- left_join(absolute_horizon_summary_rt,
+                                      absolute_horizon_summary_fd) %>%
+    mutate(relMAE = realtime_mae/fulldata_mae) %>% 
+    left_join(select(performance_summary, pid, frac_deliv_gte6bw, Population, median_annual_cases))
+
+# ggplot(filter(absolute_horizon_summary_both, absolute_horizon==1), 
+#        aes(x=frac_deliv_gte6bw, y=relMAE))  + 
+#     geom_point(aes(size=log10(median_annual_cases))) + geom_smooth(se=FALSE)+ geom_hline(yintercept=1, linetype=2) +
+#     scale_y_log10()
+
+absolute_horizon_summary <- absolute_horizon_summary_both %>%
+    group_by(absolute_horizon) %>%
+    summarize(p05_relMAE = quantile(relMAE, prob=.05, na.rm=TRUE),
+              p25_relMAE = quantile(relMAE, prob=.25, na.rm=TRUE),
+              med_relMAE = median(relMAE, na.rm=TRUE),
+              p75_relMAE = quantile(relMAE, prob=.75, na.rm=TRUE),
+              p95_relMAE = quantile(relMAE, prob=.95, na.rm=TRUE))
+
+## plots that show histograms of the relative MAE    
+# qplot(full_v_rt_relmae, data=pred_comparison_df, facets = forecast_horizon~., geom="histogram")
+# qplot(relMAE, data=absolute_horizon_summary_both, facets = absolute_horizon~., geom="histogram") + scale_x_log10() + geom_vline(xintercept=1)
+
+colnames(absolute_horizon_summary) <- c("absolute horizon", "$Q_5$", "$Q_{25}$", "$Q_{50}$ (median)", "$Q_{75}$", "$Q_{95}$")
+absolute_horizon_xtab <- xtable(absolute_horizon_summary, digits=c(0, 0, rep(2,5)), label="tab:absolute-horizon", align="cc|ccccc",
+                        caption = "Comparison of province-level prediction accuracy between full-data and real-time predictions, by prediction horizon. These results were computed comparing predictions as if the full data was available at the analysis time with the real-time predictions that build in a 6-biweek (approximately 3 month) buffer to account for delayed case data. The table shows the 5th percentile ($Q_5$), 25th percentile ($Q_{25}$), median ($Q_{50}$), 75th percentile ($Q_{75}$), and 95th percentile  ($Q_{95}$) value of the relative MAE from each province at the given horizon. The relative MAEs were calculated as the MAE from the real-time predictions divided by the MAE from the full-data predictions, i.e. values larger than 1 indicate that the real-time models showed more absolute error on average than the full-data models.")
+@
+
+% 
+% \subsection{Analysis of prediction accuracy: where do we perform better and why?}
+% To understand why our models performed better in some places than in others, we conducted a regression analysis, using the relative MAE versus a seasonal model at the province level as the outcome variable (n=76). We considered as predictors population density, the proportion of cases with reporting delay of greater than 6 biweeks, the degree of seasonality, the median number of cases per year (on the log base 10 scale), and the difference between the number of cases observed in 2014 and the median annual cases. We measured seasonality by calculating the maximum standardized value of the cyclical term of the linear predictor from a Poisson generalized additive model of raw case counts fit to a cyclical seasonal smooth spline and a long-term smooth secular trend. 
+% 
+% [Note that the y-axis for the figures is on the scale of relative MAE, so lower values indicate better model predictive performance against a seasonal model. I.e. as the seasonality increases adjusting for all other variables, the relative MAE decreases.]
+
+
+% What conditions/features of provinces are associated with our predictions doing better? Possible covariates for a regression model with log relative mean absolute error as the outcome:
+% \begin{itemize}
+%     \item population
+%     \item population density
+%     \item latitude/longitude
+%     \item proportion of cases delivered >6 weeks after onset
+%     \item measure of seasonality (degrees of freedom for a seasonal spline?)
+%     \item years of historical data available
+%     \item average number of cases per year
+%     \item CENSUS?: socio-demographic measurement of province (median income? number of hospitals/clinics in province?)
+% \end{itemize}
+
+<<province-comparison-TH40, fig.height=9, fig.width=7, fig.show='hide'>>=
+pred_comparison_df <- left_join(ungroup(biweekly_preds), fulldata_preds) %>%
+    mutate(date_sick = biweek_to_date(date_sick_biweek, date_sick_year))
+
+pp="TH40"
+print(ggplot(filter(pred_comparison_df, pid==pp), aes(x=date_sick)) + 
+          ggtitle("Bangkok predictions and observed data") +
+          geom_linerange(aes(ymin=0, ymax=case_count), data=filter(province_level_case_data, FIPS==pp, date_sick_year>=2014)) + ## true data
+          geom_line(aes(y=pred_median, group=analysis_date), color="red") + ## real-time data predictions
+          geom_point(aes(y=pred_median), shape=2, color="red") + ## real-time data predictions
+          geom_line(aes(y=fulldata_pred, group=analysis_date)) + 
+          geom_point(aes(y=fulldata_pred), shape=1)+
+          #coord_cartesian(xlim=c(2014, 2015)) + 
+          facet_grid(analysis_date~.) + 
+          theme(strip.text.y = element_blank(),
+                axis.text.x  = element_text(angle=90, vjust=0.5)) +
+          xlab(NULL) + ylab("counts"))
+@
+
+<<province-comparison-TH54, fig.height=9, fig.width=7, fig.show='hide'>>=
+pp="TH54"
+print(ggplot(filter(pred_comparison_df, pid==pp), 
+             aes(x=date_sick_year + date_sick_biweek/26)) + 
+          ggtitle(pp) +
+          geom_linerange(aes(ymin=0, ymax=case_count), data=filter(province_level_case_data, FIPS==pp, date_sick_year>=2014)) + ## true data
+          geom_line(aes(y=pred_median, group=analysis_date), color="red") + ## real-time data predictions
+          geom_point(aes(y=pred_median), shape=2, color="red") + ## real-time data predictions
+          geom_line(aes(y=fulldata_pred, group=analysis_date)) + 
+          geom_point(aes(y=fulldata_pred), shape=1)+
+                      coord_cartesian(xlim=c(2014, 2015)) + 
+          facet_grid(analysis_date~.) + xlab(NULL) + ylab("counts"))
+@
+
+\subsection{Comparing real-time to full-data predictions}
+We compared real-time  and full-data predictions that began at the same timepoint (Figure \ref{fig:nowcast-schematic}A vs. \ref{fig:nowcast-schematic}B). This analysis can help answer the question of how much the real-time predictions that removed the most recent 3 months of data were impacted by the delays in case reporting.
+As shown in Table \ref{tab:fulldata-horizon}, these analyses demonstrated that once went back 3 months to begin the nowcasting, more than 50\% of the provinces had more accurate real-time forecasts than full-data forecasts at all prediction horizons up to 3 months in advance. This suggests that inaccuracies in the real-time predictions once those recent 3 months are discarded are driven less by the reporting delays than they are by model misspecification and other background noise in the data.
+%Additionally, we observed no clear relationship between the duration of reporting delays in a province (measured by the fraction of cases delivered after 6 biweeks) and the relative MAE between real-time and full-data predictions.
+
+A second analysis compared real-time predictions with a horizon of 7 biweeks with full-data predictions at 1 biweek (Figure \ref{fig:nowcast-schematic}A vs. \ref{fig:nowcast-schematic}C). This analysis can tell us how much better or worse our model would have done if we did not need to adjust for delays in case reporting by dropping the past 3 months, i.e. if all of our data were available at the time of analysis. We refer to this realignment of horizons as the absolute horizon, to suggest that a real-time prediction that removes 6 biweeks of data and then projects 7 steps forward (Figure \ref{fig:nowcast-schematic}A) is predicting the same timestep as a full-data prediction that does not remove any data and just projects 1 biweek forward (Figure \ref{fig:nowcast-schematic}C). Results from this analysis are shown in Table \ref{tab:absolute-horizon} for absolute horizons of 1 through 4 biweeks. Overall, 66 of the 76 provinces (87\%) showed better average performance in the full-data forecasts at 1 step ahead than the real-time forecasts at 7 steps ahead (i.e. had a relative MAE of greater than 1). In a majority of the provinces at each absolute horizon the full-data forecasts were on average closer to the true value than the real-time forecasts. However across all the absolute horizons, for between 10 and 26 provinces the full-data predictions had more error than the real-time predictions. 
+While it is surprising that full-data predictions under performed real-time predictions in such a high percentage of the provinces, this reflects the challenges of making predictions in such a noisy system.
+%While it was unexpected that multi-step ahead predictions from under-reported data could be consistently more accurate than a single step ahead prediction from fully observed data, these results again reflect the difficulty of even making single-step-ahead predictions in noisy systems. 
+A sample of predictions by province and analysis date are provided as supplemental figures to illustrate this challenge.
+
+
+\section{Discussion}
+We present the prediction results from our real-time prediction infrastructure established for dengue hemorrhagic fever in Thailand. This infrastructure addresses several key practical features of real-time predictions, including real-time data management, the impact of reporting delays, and incorporating a disease transmission model that takes into account spatial and temporal trends. 
+
+The infectious disease prediction literature has a rich and varied selection of prediction algorithms but has not historically focused on the challenges of generating predictions in real-time. Continued development and refinement of such prediction pipelines, such as that presented here, will enable existing prediction methods to reach their full potential in making an impact on public health decision-making and planning.
+
+The infrastructure that we have developed for integrating real-time data into predictions for the Thai Ministry of Public Health (MOPH) is the result of a long-standing governmental/academic partnership between the MOPH and U.S.-based researchers. This collaboration has enabled the creation of a single, unified authoritative source of almost all governmental dengue surveillance ever collected in Thailand, dating back nearly 50 years \cite{Limkittikul:2014dh}. Additionally, by enabling the transmitting of surveillance data in near real-time (every two weeks from October 2013 and continuing through the writing of this manuscript in 2016), this effort has created a valuable dataset that has catalogued the reporting delays in a live surveillance system. The predictions described in this manuscript were made available to the MOPH typically within two weeks of the data being delivered to the U.S. research team via a PDF report and a private, interactive web application. The MOPH has disseminated these results to provincial, regional, and national decision-makers for use in planning for and monitoring outbreaks. Moving forward, to maximize the use of these predictions, the forecasts will be presented at the monthly high-level meetings of MOPH authorities. Decision makers at the province or health region level will use these forecasts to inform decisions about launching new interventions. Designing studies to evaluate different methods of incorporating these forecasts into real-time decision-making is an area of ongoing research for our team.  %Our team is working on developing additional methodology to more actively use this data to impute the number of unreported cases. %These data could be used in future efforts to understand and characterize the workings of this long-standing and well-respected disease surveillance system.\cite{Limkittikul:2014dh} The shared vision of our collaborative team is that predictions generated from this data-to-predictions pipeline will be used to inform public health decision making in Thailand beginning with the 2016 calendar year. 
+
+
+
+
+Formal data archiving protocols should be followed when making real-time predictions. Real-time predictions should be (1) generated prior to having the final data available and (2) formally registered or time-stamped in an independent data repository. Taking these steps ensures that no bias (intentional or not) enters the scientific process of evaluating the predictions. 
+
+While we are actively developing and validating other prediction models for this data, we chose to report the results from the prediction model that we used during 2014 to provide draft predictions to Thai public health officials. We intentionally did not perform extensive {\em post hoc} model validation or evaluation to minimize the risk of overfitting our model to this particular dataset.  
+
+Our 2014 real-time predictions varied substantially by province in quality and public health utility. In close to half of the Thai provinces, our model out-performed a seasonal baseline model predicting one month in advance. As the horizon moves forward, the seasonal baseline model makes better predictions in more provinces: at a 5 month horizon, just over 25\% of provinces are predicted better by our model than the seasonal model. 
+
+Our ability to make effective predictions into the future in a majority of provinces is made difficult by delayed case reporting. Our analyses show that if there were no reporting delays, our model would make substantially more accurate predictions in over 50\% of the Thai provinces (Table 3). In ongoing work, we are focusing efforts on building models that can create accurate ``now-casts'' of data, using other more readily available data to increase the accuracy of forecasts, an approach that has been implemented by other forecasting efforts \cite{Chakraborty:2014cl}. 
+
+%Our 2014 real-time predictions varied substantially by province in quality and public health utility. In close to half of the Thai provinces, our model outperformed a seasonal baseline model predicting one month in advance. As the horizon moves forward, the seasonal baseline model makes better predictions in more provinces: at a 5 month horizon, just over 25\% of provinces are predicted better by our model than the seasonal model. Our ability to make effective predictions into the future in a majority of provinces is made difficult by delayed case reporting. Our analyses show that if there were no reporting delays, our model would make substantially more accurate predictions in over 50\% of the Thai provinces (Table 3).
+% calculated as 100*(1-1/6.6) and 100*(1-1/1.2)
+
+%In our current framework, this means that we must begin making predictions by starting three months in the past, using a single model to create now-casts (predictions that bring us up to the current time) and then forecasts (making predictions about observations at future timepoints). In our current framework, the nowcasting and forecasting models are one and the same, although more generally these models need not be the same.
+
+While we have conducted extensive evaluation of the performance of our real-time predictions in 2014, this may not represent the performance of the model in other years. There is substantial year-to-year variation in annual province-level incidence in Thailand. The annual total number of cases observed in 2014 were in the lower half of previously observed annual incidence in \Sexpr{sum(performance_summary$diff_from_median_2014<0)} of 76 provinces. A complete characterization of our real-time model's predictive performance will require evaluation across multiple years of data that is arriving in real-time, or with historical complete data with synthetically created reporting delays. %Since we only know the reporting delays for cases delivered in the last two years, we are limited in our ability to simply assess the model performance with data from previous years. However, this process could be accelerated via simulation studies that use observed reporting delays to create synthetic underreported data for previous year's data.
+
+The simplicity of the statistical prediction models that we present in this manuscript are both a strength and a weakness. This type of phenomenological time-series model tends to show good predictive performance in the short term but have known deficiencies when making long-term predictions. Additionally, when forecasting forward from auto-regressive models, this can lead to instabilities and explosive forecasts, as was observed in the predictions from some of the provinces. Also contributing to the instability of our models in a prediction context are that we do not incorporate uncertainty in and use a smoothed value of the $y_{i, t-1}$ offset term. %Furthermore, while our results from the full-data and real-time prediction comparison suggest that on average the predictions are not made worse by using only the partially observed data, we are not currently modeling the underreported counts, instead relying on the assumption that cases are fully reported after three months (6 biweeks). We know to be an optimistic assumption in many settings and this may contribute to instability and noise in the model covariates and offset.
+
+
+The model that we present here has been shown to perform well in contexts where there are no reporting delays [manuscript in preparation]. The auto-regressive model used in this work is based on a standard statistical auto-regressive integrated moving average (ARIMA) models. In fact, the reformulation of the ARIMA model in a disease transmission model context -- making explicit the connection between modeling auto-regressive counts and the reproductive number, as shown in equation \ref{eq:spamd-Rt} -- is an important link between commonly used models in different fields. Model improvements under consideration include veryifying the utility of spatial features for all provinces, adding spatially smooth seasonal effects, choosing the correlated provinces serially through partial correlations, and incorporating overdispersion of case counts.
+
+%[The state of and challenges and frameworks for multi-step predictions (cite Ben Taieb's work).]
+%Adding additional sophisticated statistical learning machinery (e.g. ensemble prediction models) could improve the performance of our predictions. Ensemble models are frequently among the top competitors in prediction competitions, and have a strong reputation in the machine learning and statistical communities for generating robust classifications and predictions. However, they have been less frequently used in regression-style analyses, and are virtually unproven for multi-step forecasts of highly correlated time-series data – the type often observed in infectious disease situations.\cite{BenTaieb:2014vg} Machine learning research has suggested that ensemble models that create direct forecasts of all time-steps may have better predictive performance than recursive methods \cite{BenTaieb:2012in,Taieb:2015cu}. Our current model uses a recursive method for generating preditions. %could be used as one of several inputs into an ensemble model.
+
+
+
+%[The state of real-time infectious disease forecasting]
+%Registering real-time predictions to protect against reporting/publication bias towards better predictions.
+
+
+The past decade of biomedical research has borne witness to rapid growth in digital surveillance data. A pressing challenge for the professional and academic epidemiological and biostatistical communities is to learn how to turn this deluge of data into evidence that informs decision making about improving health and preventing illness at the individual and population levels. Improving real-time forecasts of infectious disease outbreaks is an important technical achievement, however, continued research and collaboration in this area is needed to develop a better understanding of how to communicate these results to public health decision makers and integrate infectious disease predictions into public health practice. 
+The collaborative effort described by this manuscript provides a template for generating real-time predictions in practice and describes specific results from this effort to integrate modern tools of data science with public health decision making.
+
+
+\bibliographystyle{unsrtnat}
+\bibliography{dengue-real-time}
+
+
+%% Table 1
+<<print-results-table-by-horizon, results='asis'>>=
+print(results_by_horizon_xtab, hline.after=0, include.rownames = FALSE,
+      table.placement="H",
+      sanitize.text.function=function(x){x},
+      add.to.row=list(list(-1), 
+                      " &&& \\multicolumn{5}{|c}{relative MAE (real-time vs. seasonal baseline)} \\\\"))
+@
+
+% Table 2
+<<print-fulldata-horizon-xtab, results='asis'>>=
+print(fulldata_horizon_xtab, hline.after=0, include.rownames = FALSE,
+      table.placement="H",
+      sanitize.text.function=function(x){x},
+      add.to.row=list(list(-1), 
+                      " & \\multicolumn{5}{|c}{relative MAE (real-time vs. full-data baseline)} \\\\"))
+@
+
+% Table 3
+<<print-absolute-horizon-xtab, results='asis'>>=
+print(absolute_horizon_xtab, hline.after=0, include.rownames = FALSE,
+      table.placement="H",
+      sanitize.text.function=function(x){x},
+      add.to.row=list(list(-1), 
+                      " & \\multicolumn{5}{|c}{relative MAE (real-time vs. full-data baseline)} \\\\"))
+@
+
+\clearpage
+
+%% Figure 1
+\begin{figure}
+%\includegraphics[width=\maxwidth]{figure/all-cases-1} 
+\caption[Raw dengue hemorrhagic fever case counts for 77 provinces of Thailand across 47 years (1968 - 2014)]{Raw dengue hemorrhagic fever case counts for 77 provinces of Thailand across 47 years (1968 - 2014). Provinces are ordered by by population (larger populations on the top). Gray regions indicate periods of time when a province was not in existence.}\label{fig:all-cases}
+\end{figure}
+
+%% Figure 2
+\begin{figure}
+%\includegraphics[width=\maxwidth]{figure/forecast-nowcast-schematic} 
+\caption[Country-wide real-time predictions for incident dengue hemorrhagic fever]{Country-wide real-time predictions for incident dengue hemorrhagic fever. Red lines show predicted case counts, black bars show cases reported by the end of the 2014 reporting period. The three figures show (top to bottom) one-, two-, and three-biweek ahead predictions. So, for example, every dot on the top graph is a one-biweek ahead real-time prediction made from all available data at the time of analysis.}\label{fig:nowcast-schematic}
+\end{figure}
+
+% Figure 3
+\begin{figure}
+%\includegraphics[width=\maxwidth]{figure/step1-forecasts-1} 
+\caption[Country-wide real-time predictions for incident dengue hemorrhagic fever]{Country-wide real-time predictions for incident dengue hemorrhagic fever. Red lines show predicted case counts, black bars show cases reported by the end of the 2014 reporting period. The three figures show (top to bottom) one-, two-, and three-biweek ahead predictions. So, for example, every dot on the top graph is a one-biweek ahead real-time prediction made from all available data at the time of analysis.}\label{fig:step1-forecasts}
+\end{figure}
+
+% Figure 4
+\begin{figure}
+%\includegraphics[width=\maxwidth]{figure/province-specific-forecasts-1} 
+\caption[Ten-step forward predictions made with available data at two time-points in 2014]{Ten-step forward predictions made with available data at two time-points in 2014 (each time indicated by a vertical dashed line). Results for nine provinces are shown, representing (from top to bottom) the best three provinces, the middle three, and the worst three performing provinces in terms of relative mean absolute error when compared to a seasonal baseline model.}\label{fig:province-specific-forecasts}
+\end{figure}
+
+
+% Figure 5
+\begin{figure}
+%\includegraphics[width=\maxwidth]{figure/mae-calculations-1} 
+\caption[Mean absolute error (MAE)]{Mean absolute error (MAE) of our prediction model by province and step forward (in biweeks). Provinces are sorted by population, with the most populous at the top of the figure.}\label{fig:mae}
+\end{figure}
+
+% Figure 6
+\begin{figure}
+%\includegraphics[width=\maxwidth]{figure/relative-mae-1} 
+\caption[Relative mean absolute error (MAE) comparing our prediction model vs]{Relative mean absolute error (MAE) comparing our prediction model vs. a model that predicts a seasonal median, by province and step forward (in biweeks). Results to the left of the dotted line signify more accurate predictions from our models when compared to the seasonal model, and results to the right indicate less accurate predictions.}\label{fig:relative-mae}
+\end{figure}
+
+\end{document}

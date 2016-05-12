@@ -1,0 +1,172 @@
+\documentclass[11pt]{article}
+\usepackage{geometry} 
+\geometry{letterpaper, top=1.5cm, left=2cm}                
+\usepackage{graphicx}
+\usepackage{amssymb, amsmath}
+\usepackage{epstopdf}
+\DeclareGraphicsRule{.tif}{png}{.png}{`convert #1 `dirname #1`/`basename #1 .tif`.png}
+
+\renewcommand{\familydefault}{cmss}
+
+\usepackage{setspace}
+\onehalfspacing
+
+\title{Supplemental Materials for: \\ Challenges in real-time prediction of infectious disease: a case study of dengue in Thailand}
+\author{Nicholas G. Reich, Stephen Lauer, Krzysztof Sakrejda, \\ Sopon Iamsirithaworn, Soawapak Hinjoy, Paphanij Suangtho, Suthanun Suthachana, \\ Hannah Clapham, Henrik Salje, Derek A T Cummings, Justin Lessler }
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+\section{Statistical model details}
+
+\subsection{Definition of biweeks and analysis times}
+For a given year, every date is mapped to a particular biweek in that year. We define the first biweek of every year as beginning on January 1st, at 00h00m00s and the last as ending on December 31st, 11h59m59s. Every year is defined to contain exactly 26 biweeks. To make predictions on the biweekly scale, daily case counts are aggregated into their respective biweek. Counts for biweeks that have 15 days are standardized by multiplying the count by $\frac{14}{15}$ and rounding to the nearest integer. The explicit Julian calendar day to biweek mapping is given in Table \ref{tab:biweekMap}.
+
+<<biweekTable, echo=FALSE, results='asis', message=FALSE>>=
+library(dengueThailand)
+library(dplyr)
+library(xtable)
+leap_yr_map <- tbl_df(with(data=environment(date_to_biweek), 
+                           expr=return(leap_year_map)))
+regular_yr_map <- tbl_df(with(data=environment(date_to_biweek), 
+                              expr=return(regular_year_map)))
+leap_yr_table <- leap_yr_map %>% 
+        group_by(biweek) %>% 
+        summarize(leap_yr_start=min(julian_day),
+                  leap_yr_end=max(julian_day))
+regular_yr_table <- regular_yr_map %>% 
+        group_by(biweek) %>% 
+        summarize(reg_yr_start=min(julian_day),
+                  reg_yr_end=max(julian_day))
+biweek_table <- inner_join(leap_yr_table, regular_yr_table)
+biweek_table <- biweek_table %>%
+        mutate(reg_yr_datestart = format(as.Date(paste0(biweek_table$reg_yr_start,"-2011"), 
+                                                 format="%j-%Y"), "%b %d"),
+               reg_yr_dur = reg_yr_end-reg_yr_start+1,
+               leap_yr_datestart = format(as.Date(paste0(biweek_table$leap_yr_start,"-2012"), 
+                                                 format="%j-%Y"), "%b %d"),
+               leap_yr_dur = leap_yr_end-leap_yr_start+1) %>%
+        select(-contains("_start"), -contains("_end"))
+print(xtable(biweek_table, digits=0, align="cccccc", label="tab:biweekMap",
+             caption="Map of Julian days to biweeks used in data aggregation. Columns show the date a biweek starts and the duration for non-leap (``reg'') and leap years."), 
+      include.rownames=FALSE, caption.placement="top")
+@
+
+
+A generic biweek $b_k$ is defined as an interval $[t_{k}, t_{k+1})$ where $t_k$ is the time where the biweeks begins (e.g. Jan 1, 00h00m00s) and $t_{k+1}$ is the start of the next biweek. Every dataset is divided up into $N$ bi-weeks ($b_1$ through $b_{N}$), each of either 14 or 15 days (see Table \ref{tab:biweekMap}). 
+
+Every forecast made specifies the following dates: a ``to-date'' ($t_{to}$), a ``delivery-date'' ($t_{del}$), and an ``analysis-date'' ($t_{an}$). The to-date specifies that the current forecast will only use cases whose symptom onset date is equal to or less than $t_{to}$. The delivery-date specifies that the current forecast will only use cases that were delivered on or before $t_{del}$. The analysis-date specifies when a given forecast was run.
+
+To account for case reporting delays, our models specify a reporting lag $l$, in biweeks, which represents the number of biweeks back into the past for which data will be considered partially reported. In the forecasting models presented in this paper, these data are ignored. For example, if we received a data delivery in the biweek $b_k=[t_{k}, t_{k+1})$, then the forecast will assume that data for the past $l$ whole biweeks are systematically underreported and that biweek $b_{k-l-1}$ and all prior biweeks are complete. This process is documented in Figure \ref{fig:timeline}.
+
+\begin{figure}[htbp]
+\begin{center}
+\caption{An example forecast timeline showing which cases are included relative to the delivery-dates and to-dates. In this figure, $l=3$.}
+\label{fig:timeline}
+\includegraphics[width=\linewidth]{figures/forecast_timeline.png}
+\end{center}
+\end{figure}
+
+
+We chose the set of analysis dates as the first day of each biweek for which data had been delivered in the previous biweek (Table \ref{tab:dates}). 
+
+\input{delivery-xtable.tex}
+
+\subsection{Province data management}
+Summary data on all provinces are provided in Table \ref{tab:province-descriptors}.
+
+Since 1968, five provinces were split into multiple provinces, from Yasothon breaking off from Ubon Ratchthani in 1972 to the foundation of Bueng Kan from Nong Khai in 2011 (see Table \ref{tab:split-provs} for full list of split provinces). New provinces are labeled as ``children'' of the ``parent'' province from which they were formed. We used all available data for each child province - with the exception of Bueng Kan - though several of these did not start reporting dengue data for years after formation. For the parent provinces - with the exception of Nong Khai - we discarded all data before the first data year of their last child province. Since Bueng Kan is such a new province, we grouped all of its counts together with that of Nong Khai to keep one province rather than remove the provinces completely.
+
+\input{prov-description-table.tex}
+
+\begin{table}[htdp]
+\caption{Split provinces}
+\begin{center}
+\begin{tabular}{lcccc}
+Province            & Type   & Family & Founding Year & First Data Year \\
+\hline
+Chiang Rai          & Parent & Chiang Rai       & pre-1968  & 1968 \\
+Phayao              & Child  & Chiang Rai       & 1977      & 1978 \\
+\hline
+Nong Khai           & Parent & Nong Khai        & pre-1968  & 1969 \\
+Bueng Kan           & Child  & Nong Khai        & 2011      & 2011 \\
+\hline
+Prachin Buri        & Parent & Prachin Buri     & pre-1968  & 1968 \\
+Sa Kaeo             & Child  & Prachin Buri     & 1993      & 1999 \\
+\hline
+Ubon Ratchathani    & Parent & Ubon Ratchathani & pre-1968  & 1968 \\
+Yasothon            & Child  & Ubon Ratchathani & 1972      & 1972 \\
+Amnat Charoen       & Child  & Ubon Ratchathani & 1993      & 1999 \\
+\hline
+Udon Thani          & Parent & Udon Thani       & pre-1968  & 1968 \\
+Nong Bua Lamphu     & Child  & Udon Thani       & 1993      & 1999 \\
+\hline
+Nakhon Phanom       & Parent & Nakhon Phanom    & pre-1968  & 1968 \\
+Mukdahan            & Child  & Udon Thani       & 1982      & 1999 \\
+\end{tabular}
+\end{center}
+\label{tab:split-provs}
+\end{table}%
+
+Since we observed that biweek 26 often appeared to have systematic underreporting even when all cases had been reported, we linearly interpolated the counts for the most recent biweek 26 prior to fitting any prediction model.
+
+
+\subsection{Model selection}
+Information on epidemic progression elsewhere in the country was taken into account by including reported case counts at various lags and for provinces that showed high levels of correlation with province $i$ in the data used to fit the model. Each province considered itself as a possible province to choose but was not forced to include itself if other provinces showed higher correlation at the specified lag. %Three different methods were used to choose the number of correlated provinces and lagged timepoints to include. 
+We chose the number of top correlated provinces and lagged timepoints based on the combination that minimized country-wide leave-one-year-out cross-validation error between 2000 and 2009. We considered all possible combinations across a grid of 1 to 15 top correlated provinces and the following combination of lag times \{(1), (1,2), (1, 2, 3), (1, 2, 3, 4), (1, 2, 3, 4, 13), (1, 2, 3, 4, 13, 26) \}, where, for example, (1, 2, 3) refers to a model that included observations from top correlated provinces at lags of 1, 2, and 3 biweeks. Using the metric of relative mean absolute error with a reference model that predicted the last observed count, this process resulted in choosing 3 provinces at a 1 biweek lag (a complete assessment of performance on fully observed data is in preparation). As shown in equation (1) in the main manuscript, these data enter the model as ratios. For example, the covariate for the lag-$k$ biweek of province $j$ for predicting a count at time $t$ would be $\log \frac{y_{t-k,j}+1}{y_{t-k-1,j}+1}$.
+
+
+
+\subsection{Methods for generating predictions}
+To generate multi-step predictions of future unobserved timepoints, we created stochastic realizations of possible trajectories for each province. Specifically, our goal was to estimate the joint distribution $f(\mathbf{Y_{t^*+h}}|\mathbf{\mathcal{Y}_{t^*}})$ where $t^*$ is the last time for which data was assumed to be fully observed, $h$ is the target prediction horizon in biweeks, $\mathbf{Y_{t^*}}$ is a random vector of all province-specific counts at time $t^*$, and $\mathcal{Y}_{t^*}$ is the set of all observed $y_{t,i}$ where $t \leq t^*$ and for all $i$. 
+
+We approximated the predictive distribution for all provinces using sequential stochastic simulations of the joint distribution of the case counts for each province. We created $M$ independently evolving sequential chains of predictions by drawing, at each prediction time point, from the province-specific Poisson distribution with means given by equation (1) in the main manuscript. For example, if data through time $t^*$ was used to fit the models for all locations, then a single simulated prediction consisted of a simulated Markov chain of dependent observations for timepoints $t^*+1$, $t^*+2$, ..., $t^*+H$, across all provinces, where H was the largest horizon considered.  To make a prediction for province $i$ at time $t^*+h$ in the $m^{th}$ chain, we draw $$\hat y^m_{t^*+h, i} \sim Poisson(\hat \lambda^m_{t^*+h,i}\cdot \hat y^m_{t^*+h-1,i})$$ where $ \hat\lambda^m_{t^*+h,i}$ is computed directly by plugging in the observed and predicted data prior to $t^*+h$ to the fitted model, and we use observed case data in the first step of prediction, i.e. $\hat y^m_{t^*,i} = y_{t^*,i}$ for all $m$.  Due to the assumed interrelations between the provinces, we simulated counts for all provinces at a single timepoint before moving on to the next timepoint.  For a given prediction horizon $h$, this process generates an empirical posterior predictive distribution for each province by evaluating the $M$ different predictions for $y_{t^*+h,i}$. Prediction intervals are generated by taking quantiles (e.g., the 2.5\% and 97.5\%) of this distribution.
+
+\subsection{Comparisons of real-time and full-data predictions}
+As described in the main manuscript, we compared predictions made with available data as if in real-time to predictions made with the final, completely reported dataset. Supplemental Figure \ref{fig:prov-comparisons1} show the real-time and full-data predictions for a selected few provinces.
+
+\begin{figure}[htbp]
+\begin{center}
+\caption{Comparison between real-time forecasts (red lines and triangles) and full-data forecasts (black lines and circles) for Bangkok. Fully observed case counts are shown as vertical bars. The graph is faceted by analysis date, with each separate plot showing predictions made on a particular analysis date. The first four rows represent predictions whose analysis date was in 2013.}
+\label{fig:prov-comparisons1}
+\includegraphics[width=\linewidth]{figure/province-comparison-TH40-1.pdf}
+\end{center}
+\end{figure}
+
+\subsection{Considerations in making real-time, multi-step predictions}
+
+Statistical frameworks to create multi-step predictions of time-series data exist \cite{Shaman:2013dr,BenTaieb:2012in}, but have  seen limited use for real-time predictions in public health settings. Creating a statistical model to create multi-step forecasts (i.e. not just predicting the `next' value in a time-series, but a sequence of future values at different time horizons) raises methodological considerations that are not present when just predicting a single time step forward. For example, one may use ``recursive'' methods to generate a dependent trajectories of the time series or ``direct'' methods that use a model explicitly predict the entire trajectory as independent observations \cite{BenTaieb:2012in}. Additionally, evaluation becomes more complex, as the performance of the model at each prediction horizon must be evaluated separately. Research on time-series prediction has examined the bias and variance in theoretical settings of different methods for multi-step predictions \cite{fan:2008wt}, although little guidance exists on how best to implement multi-step predictions in appled settings. Our current model uses a recursive method for generating predictions.
+
+One critical and unique challenge in real-time forecasting efforts that are used to inform public health decision-making is how to evaluate forecasts when the forecasts themselves are being used to inform decision-making about interventions. For example, if a forecast is made that predicts higher than usual incidence and an effective intervention is put in place that decreases transmission, it would appear that the original forecast was wrong. This scenario represents a substantial public health victory for forecasting: the forecasts were right and they enabled a timely intervention. However, it is difficult to observe the forecasting victory here because it looks as though the forecast of high incidence was incorrect. One way to address this challenge would be to create multi-scenario forecasts that take into account different possible public health responses. This would be a crucial step both for being able to appropriately assess the accuracy of forecasts when interventions are used and to evaluate the effectiveness of interventions. Without including this feature in real-time predictions, a forecast made pre-intervention may end up looking incorrect despite it being an important factor that drove action being taken.
+
+
+\section{Province-level factors that influenced predictive performance}
+
+We ran several analyses to identify province-level characteristics that influenced local predictive performance. Factors considered included the following province-specific measures:
+\begin{itemize}
+\item the total cases observed in 2014,
+\item the ratio between the number of cases reported in 2014 and the median annual cases, 
+\item a measure of seasonality, 
+\item residual variance once seasonality was accounted for, 
+\item the fraction of cases with a reporting delay of greater than 3 months (6 biweeks), and 
+\item the population density.
+\end{itemize}
+%We used generalized additive models to fit a model with each of these variables as independent variables that predicted relative mean absolute error comparing our model predictions versus a naive seasonal model that predicted seasonal medians for every observation. 
+Unadjusted relationships between the log-scale relative MAE and each predictor of interest are shown in Figure \ref{fig:unadjusted-factors}. Seasonality was determined by fitting a Poisson generalized additive model with a cyclical smooth spline on time-of-year to observed case data. The maximum magnitude of the seasonal effect (standardized across all seasons) is used as a measure of strength of seasonality. Additionally, the standard deviation of the residuals from this model is used as a measure of residual variability. Due to the limited number of observations relative to the number of predictors of interest, we do not present the results from multivariable models.
+%Smooth, adjusted relationships are shown in Figure \ref{fig:adjusted-factors}
+
+\begin{figure}[htbp]
+\begin{center}
+\caption{Relationships between possible factors influencing prediction accuracy on the population level.}
+\label{fig:unadjusted-factors}
+\includegraphics[width=\linewidth]{figure/performance-analysis-1.pdf}
+\end{center}
+\end{figure}
+
+
+\bibliographystyle{unsrt}
+\bibliography{dengue-real-time}
+
+\end{document}
